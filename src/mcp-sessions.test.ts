@@ -25,7 +25,8 @@ registry.register("stale", staleTransport);
 now = 1_000;
 registry.register("active", activeTransport);
 now = 1_500;
-assert.equal(registry.get("active"), activeTransport);
+assert.equal(registry.beginRequest("active"), activeTransport);
+registry.endRequest("active");
 now = 2_000;
 
 const idleResults = await registry.closeIdle(1_500);
@@ -33,17 +34,34 @@ assert.deepEqual(idleResults, [{ sessionId: "stale" }]);
 assert.equal(staleTransport.closeCalls, 1);
 assert.equal(activeTransport.closeCalls, 0);
 assert.equal(registry.size, 1);
-assert.equal(registry.get("stale"), undefined);
-assert.equal(registry.get("active"), activeTransport);
+assert.equal(registry.beginRequest("stale"), undefined);
+assert.equal(registry.beginRequest("active"), activeTransport);
+registry.endRequest("active");
+
+const inFlightTransport = createTransport();
+registry.register("in-flight", inFlightTransport);
+assert.equal(registry.beginRequest("in-flight"), inFlightTransport);
+assert.equal(registry.beginRequest("in-flight"), inFlightTransport);
+now = 10_000;
+
+const protectedResults = await registry.closeIdle(1);
+assert.deepEqual(protectedResults, [{ sessionId: "active" }]);
+assert.equal(inFlightTransport.closeCalls, 0);
+registry.endRequest("in-flight");
+assert.deepEqual(await registry.closeIdle(1), []);
+registry.endRequest("in-flight");
+now = 10_002;
+assert.deepEqual(await registry.closeIdle(1), [{ sessionId: "in-flight" }]);
+assert.equal(inFlightTransport.closeCalls, 1);
 
 const closeError = new Error("close failed");
 const failingTransport = createTransport(closeError);
 registry.register("failing", failingTransport);
-now = 10_000;
+now = 20_000;
 
 const failingResults = await registry.closeIdle(1);
-assert.equal(failingResults.length, 2);
-assert.deepEqual(failingResults.map((result) => result.sessionId).sort(), ["active", "failing"]);
+assert.equal(failingResults.length, 1);
+assert.deepEqual(failingResults.map((result) => result.sessionId), ["failing"]);
 assert.equal(failingResults.find((result) => result.sessionId === "failing")?.error, closeError);
 assert.equal(failingTransport.closeCalls, 1);
 assert.equal(registry.size, 0);

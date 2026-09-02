@@ -77,6 +77,38 @@ test("opening a missing checkout creates its workspace root", async (t) => {
   assert.equal((await stat(missingRoot)).isDirectory(), true);
 });
 
+test("workspace instruction discovery uses the fast search result without walking unrelated files", async (t) => {
+  const context = await fixture(t);
+  const nestedAgents = join(context.root, "nested", "AGENTS.md");
+  const unrelated = join(context.root, "unrelated");
+  await mkdir(unrelated);
+  await writeFile(join(unrelated, "CLAUDE.md"), "not returned by the injected search\n");
+
+  let searchedRoot: string | undefined;
+  const registry = new WorkspaceRegistry(context.config, undefined, {
+    contextFileSearch: async (root) => {
+      searchedRoot = root;
+      return [nestedAgents, nestedAgents, join(context.outsideRoot, "CLAUDE.md")];
+    },
+  });
+  const opened = await registry.openWorkspace(context.root);
+
+  assert.equal(searchedRoot, context.root);
+  assert.deepEqual(opened.availableAgentsFiles, [{ path: nestedAgents }]);
+});
+
+test("workspace instruction discovery falls back to the directory walker", async (t) => {
+  const context = await fixture(t);
+  const registry = new WorkspaceRegistry(context.config, undefined, {
+    contextFileSearch: async () => undefined,
+  });
+
+  const opened = await registry.openWorkspace(context.root);
+  assert.deepEqual(opened.availableAgentsFiles, [
+    { path: join(context.root, "nested", "AGENTS.md") },
+  ]);
+});
+
 test("worktree opens require Git and create an isolated managed workspace", async (t) => {
   const context = await fixture(t);
 

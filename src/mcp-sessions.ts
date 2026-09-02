@@ -10,6 +10,7 @@ export interface McpSessionCloseResult {
 interface McpSessionEntry<TTransport> {
   transport: TTransport;
   lastActivityAt: number;
+  activeRequests: number;
 }
 
 export interface McpSessionRegistryOptions {
@@ -32,15 +33,25 @@ export class McpSessionRegistry<TTransport extends ClosableMcpTransport> {
     this.sessions.set(sessionId, {
       transport,
       lastActivityAt: this.now(),
+      activeRequests: 0,
     });
   }
 
-  get(sessionId: string): TTransport | undefined {
+  beginRequest(sessionId: string): TTransport | undefined {
     const entry = this.sessions.get(sessionId);
     if (!entry) return undefined;
 
     entry.lastActivityAt = this.now();
+    entry.activeRequests += 1;
     return entry.transport;
+  }
+
+  endRequest(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return;
+
+    entry.activeRequests = Math.max(0, entry.activeRequests - 1);
+    entry.lastActivityAt = this.now();
   }
 
   remove(sessionId: string): boolean {
@@ -52,7 +63,7 @@ export class McpSessionRegistry<TTransport extends ClosableMcpTransport> {
     const idleSessions: Array<{ sessionId: string; transport: TTransport }> = [];
 
     for (const [sessionId, entry] of this.sessions) {
-      if (entry.lastActivityAt > cutoff) continue;
+      if (entry.activeRequests > 0 || entry.lastActivityAt > cutoff) continue;
 
       this.sessions.delete(sessionId);
       idleSessions.push({ sessionId, transport: entry.transport });

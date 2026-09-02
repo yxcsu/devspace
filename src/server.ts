@@ -74,7 +74,7 @@ import {
 type Transport = StreamableHTTPServerTransport;
 // MCP clients can reconnect without closing the previous transport. Bound stale
 // session retention so abandoned MCP servers do not accumulate for the life of the process.
-const MCP_SESSION_IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
+const MCP_SESSION_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1_000;
 const MCP_SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 
@@ -862,20 +862,26 @@ export function createServer(
       isInitialize: initializeRequest,
     });
 
+    let activeSessionId: string | undefined;
     try {
       let transport: Transport | undefined;
 
       if (sessionId) {
-        transport = transports.get(sessionId);
+        transport = transports.beginRequest(sessionId);
         if (!transport) {
           sendJsonRpcError(res, 404, -32000, "Unknown MCP session");
           return;
         }
+        activeSessionId = sessionId;
       } else if (initializeRequest) {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId) => {
-            if (transport) transports.register(newSessionId, transport);
+            if (transport) {
+              transports.register(newSessionId, transport);
+              transports.beginRequest(newSessionId);
+              activeSessionId = newSessionId;
+            }
             logEvent(config.logging, "info", "mcp_session_created", {
               requestId,
               sessionIdPrefix: sessionIdPrefix(newSessionId),
@@ -917,6 +923,8 @@ export function createServer(
       if (!res.headersSent) {
         sendJsonRpcError(res, 500, -32603, "Internal server error");
       }
+    } finally {
+      if (activeSessionId) transports.endRequest(activeSessionId);
     }
   });
 
