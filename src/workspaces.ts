@@ -1,6 +1,7 @@
 import { isJsonString } from "./json-value.js";
 import type { WireInput } from "./json-value.js";
 import { randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
 import type { Stats } from "node:fs";
 import { Result, type Result as BetterResult } from "better-result";
 import type {
@@ -10,7 +11,8 @@ import type {
   WorkspaceStore,
 } from "./workspace-store.js";
 import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import {
@@ -102,12 +104,18 @@ export interface OpenWorkspaceOptions {
   conversationScopeId?: string;
 }
 
+export interface WorkspaceRegistryOptions {
+  contextFileSearch?: (root: string) => Promise<string[] | undefined>;
+}
+
 type PathStats = Stats;
 
 type DirectoryOps = {
   stat: (path: string) => Promise<PathStats>;
   mkdir: (path: string, options: { recursive: true }) => Promise<WireInput>;
 };
+
+const execFileAsync = promisify(execFile);
 
 const MAX_CACHED_WORKSPACES = 32;
 
@@ -122,6 +130,7 @@ export class WorkspaceRegistry {
   constructor(
     private readonly config: ServerConfig,
     private readonly store?: WorkspaceStore,
+    private readonly options: WorkspaceRegistryOptions = {},
   ) {}
 
   async openWorkspace(
@@ -716,23 +725,31 @@ export class WorkspaceRegistry {
 
       if (realPath) loadedRealPaths.add(realPath);
     }
-
-    const discovered: AvailableAgentsFile[] = [];
-
-    await walkWorkspace(root, async (path, entry) => {
-      if (!entry.isFile()) return;
-
-      if (!CONTEXT_FILE_NAMES.has(entry.name)) return;
-
+    const discovered = new Map<string, AvailableAgentsFile>();
+    const addDiscovered = async (inputPath: string): Promise<void> => {
+      const path = resolve(root, inputPath);
+      if (!isPathInsideRoot(path, root)) return;
+      if (!CONTEXT_FILE_NAMES.has(basename(path))) return;
       if (loadedPaths.has(path)) return;
       const realPath = await tryRealpath(path);
 
       if (realPath && loadedRealPaths.has(realPath)) return;
 
-      discovered.push({ path });
-    });
+      discovered.set(realPath ?? path, { path });
+    };
 
-    return discovered.sort((a, b) => a.path.localeCompare(b.path));
+    const fastPaths = await (this.options.contextFileSearch ?? findContextFilesWithRipgrep)(root);
+    if (fastPaths !== undefined) {
+      for (const path of fastPaths) await addDiscovered(path);
+    } else {
+      await walkWorkspace(root, async (path, entry) => {
+        if (!entry.isFile()) return;
+        if (!CONTEXT_FILE_NAMES.has(entry.name)) return;
+        await addDiscovered(path);
+      });
+    }
+
+    return Array.from(discovered.values()).sort((a, b) => a.path.localeCompare(b.path));
   }
 }
 
@@ -862,4 +879,28 @@ async function walkWorkspace(
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+function isExecFileError(error: unknown): error is Error & { code?: string | number } {
+  return error instanceof Error && "code" in error;
+}
+
+async function findContextFilesWithRipgrep(root: string): Promise<string[] | undefined> {
+  const args = ["--files", "--hidden", "--no-ignore", "--null"];
+  for (const name of CONTEXT_FILE_NAMES) args.push("--glob", name);
+  for (const directory of SKIPPED_CONTEXT_DIRS) {
+    args.push("--glob", `!**/${directory}/**`);
+  }
+  args.push(root);
+
+  try {
+    const { stdout } = await execFileAsync("rg", args, {
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return stdout.split("\0").filter(Boolean);
+  } catch (error) {
+    if (isExecFileError(error) && error.code === 1) return [];
+    return undefined;
+  }
 }
